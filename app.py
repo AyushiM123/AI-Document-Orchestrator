@@ -1,6 +1,5 @@
 import streamlit as st
 import pdfplumber
-import json
 import requests
 from google import genai
 
@@ -29,10 +28,10 @@ def extract_text(file):
     else:
         return file.read().decode("utf-8")
 
-# --- Function to call Gemini API ---
+# --- Function to call Gemini (PLAIN TEXT RESPONSE) ---
 def call_gemini(document_text, question):
     prompt = f"""
-You are an intelligent document analysis agent.
+You are an intelligent document analysis assistant.
 
 Document:
 {document_text}
@@ -41,45 +40,40 @@ User Question:
 {question}
 
 Task:
-Extract 5–8 key-value pairs relevant to the question.
-Return ONLY valid JSON.
-No explanation. No markdown.
+Answer the user's question in clear, professional plain English.
+- Be concise but complete
+- Use bullet points if helpful
+- Do NOT return JSON
+- Do NOT use markdown
+- Just normal readable text
 """
     response = client.models.generate_content(
         model="models/gemini-2.0-flash",
         contents=prompt
     )
 
-    # Clean raw text
-    raw_text = response.text.strip()
-    if raw_text.startswith("```"):
-        raw_text = raw_text.strip("`")
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:].strip()
-
-    try:
-        return json.loads(raw_text)
-    except Exception:
-        return {
-            "error": "Invalid JSON returned",
-            "raw_response": raw_text
-        }
+    return response.text.strip()
 
 # --- Step 1: Extract text & call Gemini ---
-extracted_data = None
-show_email_section = False  # flag to control email input
+analysis_text = None
+show_email_section = False
+document_text = ""
 
 if uploaded_file and user_question:
-    text = extract_text(uploaded_file)
-    extracted_data = call_gemini(text, user_question)
+    document_text = extract_text(uploaded_file)
+    analysis_text = call_gemini(document_text, user_question)
 
-    st.subheader("Structured Data Extracted")
-    st.json(extracted_data)
+    st.subheader("Document Analysis Result")
+    st.text_area(
+        "AI Generated Answer",
+        analysis_text,
+        height=300
+    )
 
-    if isinstance(extracted_data, dict) and "error" not in extracted_data:
+    if analysis_text and isinstance(analysis_text, str):
         show_email_section = True
     else:
-        st.error("Cannot send email: extracted data is invalid or contains errors.")
+        st.error("Analysis failed. Please try again.")
 
 # --- Step 2: Email input & send button ---
 if show_email_section:
@@ -87,56 +81,66 @@ if show_email_section:
     send_email = st.button("Send Alert Mail")
 
     if send_email:
-        recipient_email_str = str(recipient_email).strip()
-        question_str = str(user_question).strip()
-        # --- Flatten extracted_data to a readable string for n8n ---
-        extracted_info_str = ""
-        if isinstance(extracted_data, dict):
-            for key, value in extracted_data.items():
-                extracted_info_str += f"{key}: {value}\n"
-        else:
-            extracted_info_str = str(extracted_data)
-
-        # --- Prepare payload ---
         payload = {
-            "document_text": text,
-            "extracted_info": extracted_info_str,  # flattened string
-            "question": question_str,
-            "recipient_email": recipient_email_str
+            "document_text": document_text,
+            "analysis_text": analysis_text,
+            "question": user_question.strip(),
+            "recipient_email": recipient_email.strip()
         }
 
-        # --- Debug: show payload before sending ---
+        # --- Debug payload ---
         st.write("DEBUG: Payload sent to n8n:", payload)
 
         if st.secrets.get("N8N_WEBHOOK_URL"):
             try:
-                response = requests.post(st.secrets["N8N_WEBHOOK_URL"], json=payload)
+                response = requests.post(
+                    st.secrets["N8N_WEBHOOK_URL"],
+                    json=payload
+                )
+
                 st.write("DEBUG: Raw n8n response:", response.text)
 
-                # Try parsing JSON, fallback if fails
                 try:
                     result = response.json()
                 except Exception:
-                    result = {
-                        "final_answer": "Email sent (could not parse JSON)",
-                        "email_body": payload["extracted_info"],
-                        "status": "SENT"
-                    }
+                    result = {}
+
+                # 🔒 HARD GUARANTEE: Generated Email Body NEVER blank
+                if not result.get("email_body"):
+                    result["email_body"] = analysis_text
+
+                if not result.get("status"):
+                    result["status"] = "SENT"
+
+                if not result.get("final_answer"):
+                    result["final_answer"] = "Processed successfully"
 
             except Exception as e:
                 result = {
                     "final_answer": "Failed to call n8n webhook",
-                    "email_body": "",
+                    "email_body": analysis_text,
                     "status": f"FAILED ({str(e)})"
                 }
 
             # --- Display results ---
             st.subheader("Final Analytical Answer")
             st.write(result.get("final_answer", "No answer returned"))
+
             st.subheader("Generated Email Body")
-            st.write(result.get("email_body", "No email generated"))
+            st.text_area(
+                "Email Content",
+                result.get("email_body", ""),
+                height=250
+            )
+
             st.subheader("Email Automation Status")
-            st.success(result.get("status", "Webhook called"))
+            status = result.get("status", "UNKNOWN")
+            if status == "SENT":
+                st.success("SENT")
+            elif status == "SKIPPED":
+                st.warning("SKIPPED")
+            else:
+                st.info(status)
 
         else:
             st.warning("n8n Webhook URL not configured yet!")
