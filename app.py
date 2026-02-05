@@ -140,7 +140,7 @@ if show_email_section:
             elif status == "SKIPPED":
                 st.warning("SKIPPED")
             else:
-                st.info(status)
+                st.info(status)   
 
         else:
             st.warning("n8n Webhook URL not configured yet!")
